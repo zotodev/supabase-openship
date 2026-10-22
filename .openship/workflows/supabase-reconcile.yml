@@ -1,0 +1,40 @@
+# Openship Actions: one button = "manager reconcile": re-apply SUPABASE_ENV_*
+# and COMPOSE_OVERRIDES to .env, update to SUPABASE_VERSION if needed (with the
+# same breaking-release gate), then "run.sh start". Same thing the manager does
+# on every (re)start; handy after editing env without redeploying the manager.
+# NOTE: the manager container's env is fixed at create time - after changing
+# its env in Openship, "Apply env"/redeploy the manager instead of this.
+name: "Supabase: reconcile"
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  reconcile:
+    runs-on: [self-hosted, openship, linux]
+    timeout-minutes: 90
+    env:
+      OPENSHIP_PROJECT_ID: ${{ vars.OPENSHIP_PROJECT_ID }}
+    steps:
+      - name: manager reconcile
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Locate the manager container by the label Openship stamps on every
+          # compose service container (name changes briefly during a cutover).
+          # Optional repo/workflow variable OPENSHIP_PROJECT_ID narrows the match.
+          filter=(--filter label=openship.service=supabase-manager --filter status=running)
+          [ -z "${OPENSHIP_PROJECT_ID:-}" ] || filter+=(--filter "label=openship.project=${OPENSHIP_PROJECT_ID}")
+          C=$(docker ps -q "${filter[@]}")
+          n=$(printf "%s\n" "$C" | grep -c . || true)
+          if [ "$n" != 1 ]; then
+            echo "::error::Expected exactly 1 running supabase-manager container, found ${n}. Is the project deployed / mid-redeploy? Retry in a minute."
+            docker ps -a --filter label=openship.service=supabase-manager --format "{{.Names}}  {{.Status}}" || true
+            exit 1
+          fi
+          rc=0
+          docker exec "$C" manager reconcile || rc=$?
+          echo "---"
+          docker exec "$C" manager status || true
+          [ "$rc" = 0 ] || echo "::error::reconcile did not complete (exit $rc) - see the manager state line above"
+          exit "$rc"

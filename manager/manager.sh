@@ -14,8 +14,16 @@
 #   manager status           stack + manager state
 #   manager health           exit 0 if manager state ok and all services running
 #   manager backup           pg_dumpall + pgsodium key + files + .env
-#   manager update [--to T]  update to T (default $SUPABASE_VERSION) now
-#   manager logs <svc> [...] docker compose logs (passes args to `run.sh logs`)
+#   manager update [--to T] [--dry-run]
+#                            update to T (default $SUPABASE_VERSION) now. Exit:
+#                            0 ok/nothing to do, 3 refused (breaking gate, bad
+#                            or downgrade target; nothing changed), 2 update.sh
+#                            merge conflicts (containers NOT recreated), 1 other.
+#                            --dry-run: gate check + `update.sh --dry-run` only;
+#                            no lock, backup, write or restart.
+#   manager logs <svc> [...] docker compose logs -f (passes args to `run.sh logs`;
+#                            follows forever - for a bounded tail use
+#                            `manager compose logs --tail N <svc>`)
 #   manager psql [args]      psql as postgres inside supabase-db
 #   manager compose <args>   docker compose <args> in $SUPABASE_DIR
 #
@@ -195,7 +203,8 @@ do_backup() {
 
 # --- update ----------------------------------------------------------------
 # do_update returns 0 = updated / nothing to do, 3 = refused before changing
-# anything (old stack stays as is), 1 = failed part-way (files may have changed).
+# anything (old stack stays as is), 2 = update.sh left merge conflicts (files
+# changed, containers not recreated), 1 = failed part-way (files may have changed).
 
 # Print upgrades.json entries (from the TARGET release) in (from, to] that need
 # manual action, one "<version> <breaking> <gate>" per line.
@@ -259,7 +268,7 @@ do_update() {  # do_update <target> [auto]
     set -e
     if [ "$rc" = 2 ]; then
         set_state blocked "update.sh left merge CONFLICTS in $SUPABASE_DIR (files with <<<<<<< markers). Containers were NOT recreated and keep running $from. Resolve via 'manager compose config' / an SSH shell, re-run 'manager update'."
-        return 1
+        return 2
     elif [ "$rc" != 0 ]; then
         set_state error "update.sh failed (exit $rc); containers not recreated"
         return 1
@@ -274,6 +283,50 @@ do_update() {  # do_update <target> [auto]
     run_sh pull || { set_state error "image pull failed; old containers still running"; return 1; }
     run_sh recreate || { set_state error "recreate failed - check 'manager status' / 'manager logs <svc>'"; return 1; }
     set_state ok "updated $from -> $target"
+}
+
+# Report-only: what would `manager update` do? Writes nothing, takes no lock.
+do_update_dry() {  # do_update_dry <target>
+    local target=$1 from gates v unacked=""
+    from=$(current_ref) || die "no .supabase-version"
+    [ "$from" != "$target" ] || { log "already on $target - nothing to do"; return 0; }
+    case "$target" in self-hosted/v*) ;; *) die "target '$target' is not a self-hosted/vX.Y.Z tag" ;; esac
+    case "$from" in
+        self-hosted/v*) ! ver_gt "$(ver "$from")" "$(ver "$target")" \
+            || warn "a real update would be REFUSED: downgrade $from -> $target is not supported" ;;
+    esac
+    log "DRY RUN $from -> $target: no backup, nothing written, nothing restarted"
+    log "manual-action notes for this range (from upstream upgrades.json):"
+    gates=$(gated_releases "$from" "$target") || die "could not read upgrades.json for $target"
+    while read -r v _ _; do
+        [ -n "$v" ] || continue
+        printf ',%s,' "$ACK_BREAKING" | tr -d ' ' | grep -q ",$v," || unacked="$unacked $v"
+    done <<< "$gates"
+    if [ -n "$unacked" ]; then
+        warn "a real update would be REFUSED: breaking/gated release(s) not in ACK_BREAKING:$unacked"
+    else
+        log "breaking-release gate: would pass"
+    fi
+    (cd "$SUPABASE_DIR" && sh update.sh --to "$target" --dry-run)
+}
+
+cmd_update() {  # cmd_update [--to T] [--dry-run]
+    local t="" dry=0 pinned
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --to) [ $# -ge 2 ] && [ -n "$2" ] || die "--to needs a self-hosted/vX.Y.Z tag"; t=$2; shift 2 ;;
+            --dry-run) dry=1; shift ;;
+            *) die "unknown update option: $1 (usage: manager update [--to T] [--dry-run])" ;;
+        esac
+    done
+    [ -n "$t" ] || t=$(resolve_target)
+    if [ "$dry" = 1 ]; then do_update_dry "$t"; return; fi
+    take_lock 600
+    do_update "$t"  # not in a condition: keep set -e; a non-zero return exits with it
+    pinned=$(resolve_target 2>/dev/null || true)
+    if [ -n "$pinned" ] && [ "$pinned" != "$t" ] && [ "$(current_ref 2>/dev/null)" = "$t" ]; then
+        warn "SUPABASE_VERSION resolves to $pinned but the stack is now on $t. Set SUPABASE_VERSION=$t (Openship env of supabase-manager) - otherwise the next manager restart reconciles towards $pinned (a downgrade is refused and leaves the manager 'blocked')."
+    fi
 }
 
 # --- reconcile ---------------------------------------------------------------
@@ -363,7 +416,7 @@ case "$cmd" in
     status)    status ;;
     health)    health ;;
     backup)    take_lock 600; do_backup manual ;;
-    update)    t=$(resolve_target); [ "${1:-}" = --to ] && t=$2; take_lock 600; do_update "$t" ;;
+    update)    cmd_update "$@" ;;
     logs)      run_sh logs "$@" ;;
     psql)      exec docker exec -it "$DB_CONTAINER" psql -U postgres "$@" ;;
     compose)   compose "$@" ;;

@@ -52,6 +52,7 @@ manager/Dockerfile                 manager image
 manager/manager.sh                 entrypoint + CLI (`manager help`)
 overrides/docker-compose.logrotate.yml  local log driver, 10m x 3 (db 20m x 5)
 overrides/docker-compose.tailnet.yml    publish ports only on BIND_IP
+.openship/workflows/supabase-*.yml      Openship Actions: one UI button per manager command
 ```
 
 Nothing from upstream is vendored: the manager downloads the tag's files.
@@ -93,7 +94,8 @@ in `/srv/supabase`, and `update.sh` 3-way-merges upstream changes into it.
    healthcheck start period is 15 min.
 5. Retrieve the generated keys: in the Openship terminal for the manager (or
    `ssh` + `docker exec -it <manager> sh`), run
-   `cd /srv/supabase && sh run.sh secrets` (or `cat .env`).
+   `cd /srv/supabase && sh run.sh secrets` (or `cat .env`). This is deliberately
+   **not** a UI button, see [Operations from the Openship UI](#operations-from-the-openship-ui).
 
 ### Exposure (important)
 
@@ -119,6 +121,7 @@ to them. Use:
 ```
 manager status            # state + docker compose ps
 manager logs auth         # follows (-f), Ctrl-C to stop; any service name
+manager compose logs --tail 200 auth   # bounded, no follow
 manager psql              # psql as postgres in supabase-db
 manager compose <args>    # any docker compose command in /srv/supabase
 ```
@@ -166,10 +169,10 @@ during an update ends the update step, so check `manager status` afterwards.
   `pg_dumpall.sql.gz`, `pgsodium_root.key`, and `files.tar.gz` (`.env`,
   version stamp, compose files, `volumes/storage`, `snippets`, `functions`).
   Retention is `BACKUP_KEEP_DAYS`.
-* Scheduled: Openship does not auto-detect `supabase/postgres`. Add an
-  Openship **Job** (cron, runs over SSH on the host), for example daily:
-  `docker exec $(docker ps -qf name=supabase-manager) manager backup`.
-  Openship may prefix the container name; adjust the filter.
+* From the UI: the **Supabase: backup now** workflow (see below).
+* Scheduled: Openship does not auto-detect `supabase/postgres`. Either
+  **Jobs → New job → Run workflow** → *Supabase: backup now*, cron `0 3 * * *`,
+  or a plain command Job (see the Jobs table below).
 * Copy `/srv/supabase-backups` off the box (restic/rclone). The pgsodium key
   and `.env` are secrets.
 * Restore (outline): stop the stack, restore `files.tar.gz` into
@@ -177,6 +180,114 @@ during an update ends the update step, so check `manager status` afterwards.
   `zcat pg_dumpall.sql.gz | docker exec -i supabase-db psql -U supabase_admin -d postgres`
   on a fresh data dir, and put the pgsodium key in place *before* first start.
   Rehearse this on a scratch VM; it is not automated here.
+
+## Operations from the Openship UI
+
+`.openship/workflows/` holds one Openship Actions workflow per manager command.
+They are **independent Openship workflows** (Openship runs them itself with its
+act-based runner; GitHub ignores `.openship/`). Each one is
+`workflow_dispatch` only, so a push never runs one and a run never deploys.
+They are not in `autoDeployPaths`, and `.dockerignore` excludes `.openship/`,
+so editing them never rebuilds or redeploys the manager.
+
+| Workflow (button) | Inputs | Runs (inside the manager) | Timeout |
+|---|---|---|---|
+| Supabase: status | none | `manager status` + `manager health` (warns if unhealthy) | 5 min |
+| Supabase: backup now | none | `manager backup`, then lists the backup dir | 60 min |
+| Supabase: update | `to` (tag, empty = `SUPABASE_VERSION`), `dry_run` (**default on**) | `manager update [--to T] [--dry-run]` | 120 min |
+| Supabase: reconcile | none | `manager reconcile` (re-apply env/overrides, update if needed, `run.sh start`) | 90 min |
+| Supabase: logs | `service` (choice), `lines` (1-5000, default 200), `since` (optional) | `manager compose logs --tail N [--since S] <svc>` (no follow) | 5 min |
+| Supabase: restart service | `service` (choice), `mode` = `restart` / `recreate` | `docker compose restart <svc>` or `up -d --wait --force-recreate --no-deps <svc>` (`recreate` applies `.env` changes) | 15 min |
+| Supabase: secrets check (no values) | none | set/missing, 8-char sha256 fingerprints, flags `.env.example` defaults; prints only public values (URLs, `ANON_KEY`, publishable key, dashboard user) | 5 min |
+
+Every workflow finds the manager with
+`docker ps -q --filter label=openship.service=supabase-manager --filter status=running`
+(Openship stamps `openship.service` on each compose service container; the
+name `openship-<slug>-supabase-manager` briefly differs during a cutover) and
+refuses unless exactly one matches. If you run more than one such project on
+the server, set an Openship Actions **variable** `OPENSHIP_PROJECT_ID` to this
+project's id to add `--filter label=openship.project=<id>`.
+
+Update outcomes: exit 0 = done (or dry run / already on target); **3** =
+refused before changing anything (breaking release not in `ACK_BREAKING`,
+downgrade or bad tag); **2** = `update.sh` merge conflicts (containers not
+recreated); anything else = failed. The run fails with a message for each.
+If you update to a tag other than `SUPABASE_VERSION`, the run warns you to set
+`SUPABASE_VERSION` to it, otherwise the next manager restart reconciles back
+towards the old pin (a downgrade, refused, manager `blocked`).
+
+### One-time setup
+
+1. **Runner.** Actions → Runners → Add runner → **Existing server** (the VPS
+   running Supabase). Either:
+   * **Native Linux** (simplest): steps run as the server user Openship
+     connects with. That user must be able to run `docker` (root, or in the
+     `docker` group).
+   * **Linux container** (e.g. the Ubuntu preset `catthehacker/ubuntu:act-22.04`,
+     which has the docker CLI) with **Allow Docker access** enabled. The job
+     container runs with the connected user's UID/GID, so that user must still
+     be able to use `/var/run/docker.sock`.
+2. **Import.** Project → Actions → select this repo/branch → tick the
+   `.openship/workflows/supabase-*.yml` files (Select all) → Run settings:
+   choose the runner from step 1 → save. They do not need to be "required"
+   for deployments; leave the project's deployment automation as it is.
+3. **Access.** Default is "Only my account" + **Approve each run**. For
+   one-click buttons choose **Automatically allow eligible users** (keep
+   access limited to your own account). Keep per-run approval if others can
+   trigger workflows.
+4. Optional: Actions variable `OPENSHIP_PROJECT_ID` (see above).
+
+Then each workflow has a **Run** button with an input form. Live logs show in
+the run page. Openship keeps run history for 30 days (logs up to 8 MiB per
+job). Openship's own default timeout is 60 min, and the workflows set their
+own `timeout-minutes`. For a nightly backup use **Jobs → New job → Run
+workflow** (pick *Supabase: backup now*), or uncomment the `schedule:` block in
+`supabase-backup.yml` (UTC; Openship runs independent schedules while its
+controller is online, min. 5 min apart, no catch-up of missed runs).
+
+### Security
+
+* **A runner that can use Docker is root on the host**, the same as the
+  manager's socket mount. Anyone who can edit these workflows (repo write
+  access) or trigger them with auto-approval can control the server. Keep
+  the repo private, protect `main`, and keep Actions access to your account.
+* **There is no "show secrets" button, on purpose.** Run output is stored in
+  Openship run history and can be included in notifications, so a
+  workflow or Job printing `run.sh secrets` would copy your JWT secret,
+  service-role key and DB password there. *Secrets check* prints fingerprints
+  only (compare with `printf %s "$VALUE" | sha256sum | cut -c1-8`). As a second
+  line of defence it registers every secret value with `::add-mask::` first,
+  so the runner prints `***` if one ever shows up. To read a secret, use the
+  manager's **Terminal** tab: `sh /srv/supabase/run.sh secrets`.
+* Service **logs** are not masked. Supabase services normally don't log
+  secrets, but treat log runs as sensitive.
+* Plain Openship **Jobs** (below) do **not** mask anything: their output is
+  stored as-is (200k chars, 30 days) and the last 20 lines go into
+  notifications.
+
+### Alternative: plain Openship Jobs
+
+If you prefer Jobs (no runner, no repo files; created in the UI, the
+`openship job` CLI or the API; run on the server's shell; no input
+forms, so edit the job's env instead): **Jobs → New job**, pick the server,
+schedule *manual* (or cron), and use the prefix below plus a command:
+
+```sh
+C=$(docker ps -q --filter label=openship.service=supabase-manager --filter status=running)
+[ "$(printf '%s\n' "$C" | grep -c .)" = 1 ] || { echo "need exactly 1 running manager"; exit 1; }
+```
+
+| Job | Command (after the prefix) | Timeout |
+|---|---|---|
+| Supabase status | `docker exec "$C" manager status` | 1 min |
+| Supabase backup (cron `0 3 * * *` if wanted) | `docker exec "$C" manager backup` | 60 min |
+| Supabase update | `docker exec "$C" manager update ${TO:+--to "$TO"} ${DRY:+--dry-run}` (job env `TO=self-hosted/vX.Y.Z`, `DRY=1`) | 120 min |
+| Supabase reconcile | `docker exec "$C" manager reconcile` | 90 min |
+| Supabase logs auth | `docker exec "$C" manager compose logs --no-color --tail 200 auth` | 1 min |
+| Supabase restart auth | `docker exec "$C" manager compose restart auth` | 5 min |
+
+Never use `-t`/`-it` (no TTY), so `manager psql` does not work from Jobs or
+workflows. Use the Terminal tab for that.
 
 ## Security
 
@@ -225,7 +336,27 @@ Verified (on a test box with a real Docker 28.5 daemon):
   `ACK_BREAKING=0.8.0` proceeds; a local edit is reported as a conflict and
   the stack is not recreated.
 
+* Openship workflows (`.openship/workflows/`): `actionlint` + `yamllint`
+  clean. Each one was run with `act` v0.2.89 (the act version Openship's
+  runner pins), on the host (≈ native mode) and status in a
+  `catthehacker/ubuntu:act-22.04` container with the socket (≈ container mode
+  + Allow Docker access), against the built manager image and a stub stack
+  (real upstream v0.8.3 `run.sh`/`update.sh`/`.env.example`, busybox/postgres
+  services with upstream names). Passing: status, backup (real `pg_dumpall` +
+  key), logs (tail, since, unknown service and bad `lines` rejected), restart and
+  recreate, reconcile, update dry run from 0.8.2 (no files changed, no backup),
+  update refused by the 0.8.0 gate (exit 3), update with merge conflicts
+  (exit 2), bad tag, manager-not-found (0 and 2 matches, project filter).
+  Secrets check: fingerprints match `sha256sum`, defaults flagged, none of the
+  13 secret values appear in the raw log, and `::add-mask::` replaced a
+  deliberately printed value with `***`.
+
 Not verified / inferred:
+* Inside a real Openship instance: workflow import, the runner label match
+  (`[self-hosted, openship, linux]`), input forms, approvals, and the
+  `vars.OPENSHIP_PROJECT_ID` variable. A runner running as a non-root user
+  (Openship's container runner uses the connected user's UID/GID) was not
+  tested.
 * Openship behaviour: `build` with a repo-root context and `dockerfile` path,
   honouring `HEALTHCHECK`/healthcheck, env editor → container env, and the Job
   syntax/container naming.

@@ -1,0 +1,78 @@
+# Openship Actions: one button = restart (or force-recreate) one Supabase
+# service. "restart" keeps the container (does NOT pick up .env changes);
+# "recreate" = upstream "run.sh recreate <svc>" (force-recreate, no deps,
+# waits for healthy) and applies .env / compose changes to that service.
+name: "Supabase: restart service"
+on:
+  workflow_dispatch:
+    inputs:
+      service:
+        description: "Supabase compose service"
+        type: choice
+        required: true
+        default: auth
+        options:
+          - db
+          - auth
+          - rest
+          - realtime
+          - storage
+          - api-gw
+          - studio
+          - meta
+          - functions
+          - supavisor
+          - imgproxy
+          - analytics
+          - vector
+          - pgbouncer
+          - minio
+          - rustfs
+          - caddy
+          - nginx
+      mode:
+        description: "restart = docker restart; recreate = force-recreate (applies .env changes)"
+        type: choice
+        required: true
+        default: restart
+        options:
+          - restart
+          - recreate
+permissions:
+  contents: read
+jobs:
+  restart:
+    runs-on: [self-hosted, openship, linux]
+    timeout-minutes: 15
+    env:
+      OPENSHIP_PROJECT_ID: ${{ vars.OPENSHIP_PROJECT_ID }}
+      SERVICE: ${{ inputs.service }}
+      MODE: ${{ inputs.mode }}
+    steps:
+      - name: restart service
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Locate the manager container by the label Openship stamps on every
+          # compose service container (name changes briefly during a cutover).
+          # Optional repo/workflow variable OPENSHIP_PROJECT_ID narrows the match.
+          filter=(--filter label=openship.service=supabase-manager --filter status=running)
+          [ -z "${OPENSHIP_PROJECT_ID:-}" ] || filter+=(--filter "label=openship.project=${OPENSHIP_PROJECT_ID}")
+          C=$(docker ps -q "${filter[@]}")
+          n=$(printf "%s\n" "$C" | grep -c . || true)
+          if [ "$n" != 1 ]; then
+            echo "::error::Expected exactly 1 running supabase-manager container, found ${n}. Is the project deployed / mid-redeploy? Retry in a minute."
+            docker ps -a --filter label=openship.service=supabase-manager --format "{{.Names}}  {{.Status}}" || true
+            exit 1
+          fi
+          if ! docker exec "$C" manager compose config --services | grep -qx "$SERVICE"; then
+            echo "::error::service '$SERVICE' is not in the active compose files. Active services:"
+            docker exec "$C" manager compose config --services
+            exit 1
+          fi
+          case "$MODE" in
+            restart)  docker exec "$C" manager compose restart "$SERVICE" ;;
+            recreate) docker exec "$C" manager compose up -d --wait --force-recreate --no-deps "$SERVICE" ;;
+            *) echo "::error::mode must be restart or recreate"; exit 1 ;;
+          esac
+          docker exec "$C" manager compose ps "$SERVICE"
