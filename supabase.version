@@ -1,0 +1,4 @@
+# Default self-hosted Supabase release for the manager. Bump this in a commit
+# to upgrade (or set SUPABASE_VERSION in Openship, which wins). Use exact tags:
+# https://github.com/supabase/supabase/blob/master/docker/CHANGELOG.md
+self-hosted/v0.8.3

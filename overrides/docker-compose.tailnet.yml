@@ -1,0 +1,14 @@
+# Publish Supabase's host ports ONLY on one address (e.g. this server's
+# Tailscale IP) instead of upstream's default 0.0.0.0 / [::].
+# Enable:   COMPOSE_OVERRIDES="logrotate tailnet"
+#           SUPABASE_ENV_BIND_IP=100.x.y.z      (output of `tailscale ip -4`)
+# Use 127.0.0.1 instead if you front the gateway with `tailscale serve`.
+# `!override` replaces upstream's port list instead of appending to it.
+services:
+  api-gw:
+    ports: !override
+      - ${BIND_IP:?set SUPABASE_ENV_BIND_IP}:${API_GW_HTTP_PORT:-${KONG_HTTP_PORT:-8000}}:8000/tcp
+  supavisor:
+    ports: !override
+      - ${BIND_IP:?set SUPABASE_ENV_BIND_IP}:${POSTGRES_PORT}:5432
+      - ${BIND_IP:?set SUPABASE_ENV_BIND_IP}:${POOLER_PROXY_PORT_TRANSACTION}:6543

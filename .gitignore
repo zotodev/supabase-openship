@@ -1,14 +1,4 @@
-# Secrets - never commit
+# Secrets never live in this repo - they are generated on the server in
+# /srv/supabase/.env by the manager.
 .env
 .env.*
-!.env.example
-
-# Server-side state (only exists in the host clone at /srv/supabase)
-data/
-backups/
-
-# Scratch from upstream tools
-upstream/.env
-upstream/backups/
-upstream/update.sh.dist
-*.old

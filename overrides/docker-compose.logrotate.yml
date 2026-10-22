@@ -1,0 +1,25 @@
+# Caps Docker's own log files per Supabase container (the official compose sets
+# no `logging:` options and Docker's json-file default never rotates).
+# Enabled via COMPOSE_OVERRIDES=logrotate; the manager copies this file into
+# /srv/supabase and runs `sh run.sh config add logrotate`.
+x-logging: &default-logging
+  driver: local
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  studio:    { logging: *default-logging }
+  api-gw:    { logging: *default-logging }
+  auth:      { logging: *default-logging }
+  rest:      { logging: *default-logging }
+  realtime:  { logging: *default-logging }
+  storage:   { logging: *default-logging }
+  imgproxy:  { logging: *default-logging }
+  meta:      { logging: *default-logging }
+  functions: { logging: *default-logging }
+  supavisor: { logging: *default-logging }
+  db:
+    logging:
+      driver: local
+      options: { max-size: "20m", max-file: "5" }

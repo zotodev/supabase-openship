@@ -1,3 +1,0 @@
-# Supabase self-hosted version stamp. Managed by setup.sh / update.sh.
-# Do not commit or edit by hand. Records the ref this deployment was based on.
-ref=self-hosted/v0.8.3
