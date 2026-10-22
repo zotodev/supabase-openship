@@ -1,0 +1,7 @@
+{
+  "$schema": "https://openship.io/openship.schema.json",
+  "composePath": "openship-compose.yml",
+  "autoDeployPaths": {
+    "include": ["openship-compose.yml"]
+  }
+}

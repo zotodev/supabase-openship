@@ -1,0 +1,14 @@
+# Secrets - never commit
+.env
+.env.*
+!.env.example
+
+# Server-side state (only exists in the host clone at /srv/supabase)
+data/
+backups/
+
+# Scratch from upstream tools
+upstream/.env
+upstream/backups/
+upstream/update.sh.dist
+*.old
