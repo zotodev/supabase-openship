@@ -79,9 +79,13 @@ jobs:
             case "$SINCE" in *[!0-9A-Za-z:.+-]*) echo "::error::bad 'since' value"; exit 1 ;; esac
             args+=(--since "$SINCE")
           fi
-          if ! docker exec "$C" manager compose config --services | grep -qx "$SERVICE"; then
+          if ! services=$(docker exec "$C" manager compose config --services); then
+            echo "::error::'docker compose config' failed in /srv/supabase (unresolved update merge conflicts? run 'Supabase: status')."
+            exit 1
+          fi
+          if ! printf '%s\n' "$services" | grep -qx "$SERVICE"; then
             echo "::error::service '$SERVICE' is not in the active compose files (enable its override first). Active services:"
-            docker exec "$C" manager compose config --services
+            printf '%s\n' "$services"
             exit 1
           fi
           docker exec "$C" manager compose logs "${args[@]}" "$SERVICE"
