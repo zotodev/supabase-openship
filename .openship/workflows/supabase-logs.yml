@@ -1,0 +1,91 @@
+# Openship Actions: one button = last N log lines of one Supabase service
+# (docker compose logs --tail N, NOT follow - the run ends by itself).
+# Services: base stack of self-hosted/v0.8.3 docker-compose.yml; analytics/vector
+# need the "logs" override, pgbouncer/minio/rustfs/caddy/nginx their overrides.
+# CAUTION: service logs are stored in Openship run history (30 days) and are
+# NOT masked; most Supabase services don't log secrets, but treat them as
+# sensitive.
+name: "Supabase: logs"
+on:
+  workflow_dispatch:
+    inputs:
+      service:
+        description: "Supabase compose service"
+        type: choice
+        required: true
+        default: db
+        options:
+          - db
+          - auth
+          - rest
+          - realtime
+          - storage
+          - api-gw
+          - studio
+          - meta
+          - functions
+          - supavisor
+          - imgproxy
+          - analytics
+          - vector
+          - pgbouncer
+          - minio
+          - rustfs
+          - caddy
+          - nginx
+      lines:
+        description: "How many recent lines (1-5000)"
+        type: number
+        required: false
+        default: 200
+      since:
+        description: "Optional: only newer than, e.g. 30m, 2h, 2026-10-22T10:00:00"
+        type: string
+        required: false
+        default: ""
+permissions:
+  contents: read
+jobs:
+  logs:
+    runs-on: [self-hosted, openship, linux]
+    timeout-minutes: 5
+    env:
+      OPENSHIP_PROJECT_ID: ${{ vars.OPENSHIP_PROJECT_ID }}
+      SERVICE: ${{ inputs.service }}
+      LINES: ${{ inputs.lines }}
+      SINCE: ${{ inputs.since }}
+    steps:
+      - name: manager compose logs
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Locate the manager container by the label Openship stamps on every
+          # compose service container (name changes briefly during a cutover).
+          # Optional repo/workflow variable OPENSHIP_PROJECT_ID narrows the match.
+          filter=(--filter label=openship.service=supabase-manager --filter status=running)
+          [ -z "${OPENSHIP_PROJECT_ID:-}" ] || filter+=(--filter "label=openship.project=${OPENSHIP_PROJECT_ID}")
+          C=$(docker ps -q "${filter[@]}")
+          n=$(printf "%s\n" "$C" | grep -c . || true)
+          if [ "$n" != 1 ]; then
+            echo "::error::Expected exactly 1 running supabase-manager container, found ${n}. Is the project deployed / mid-redeploy? Retry in a minute."
+            docker ps -a --filter label=openship.service=supabase-manager --format "{{.Names}}  {{.Status}}" || true
+            exit 1
+          fi
+          case "${LINES:-200}" in ''|*[!0-9]*) echo "::error::lines must be a whole number"; exit 1 ;; esac
+          lines=${LINES:-200}
+          if [ "$lines" -lt 1 ] || [ "$lines" -gt 5000 ]; then echo "::error::lines must be 1-5000"; exit 1; fi
+          args=(--no-color --timestamps --tail "$lines")
+          if [ -n "${SINCE:-}" ]; then
+            case "$SINCE" in *[!0-9A-Za-z:.+-]*) echo "::error::bad 'since' value"; exit 1 ;; esac
+            args+=(--since "$SINCE")
+          fi
+          if ! services=$(docker exec "$C" manager compose config --services); then
+            echo "::error::'docker compose config' failed in /srv/supabase (unresolved update merge conflicts? run 'Supabase: status')."
+            exit 1
+          fi
+          if ! printf '%s\n' "$services" | grep -qx "$SERVICE"; then
+            echo "::error::service '$SERVICE' is not in the active compose files (enable its override first). Active services:"
+            printf '%s\n' "$services"
+            exit 1
+          fi
+          docker exec "$C" manager compose logs "${args[@]}" "$SERVICE"

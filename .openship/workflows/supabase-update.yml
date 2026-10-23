@@ -1,0 +1,73 @@
+# Openship Actions: one button = "manager update". Takes a pre-update backup,
+# runs upstream update.sh (three-way merge), pulls and recreates.
+# Leave "to" empty to update to SUPABASE_VERSION (the manager's configured
+# target). If you update to a tag other than SUPABASE_VERSION, set
+# SUPABASE_VERSION to that tag in Openship afterwards (the run warns you).
+name: "Supabase: update"
+on:
+  workflow_dispatch:
+    inputs:
+      to:
+        description: "Target tag, e.g. self-hosted/v0.8.4 (empty = SUPABASE_VERSION)"
+        type: string
+        required: false
+        default: ""
+      dry_run:
+        description: "Dry run: only show what would change (no backup, no writes, no restart)"
+        type: boolean
+        required: false
+        default: true
+permissions:
+  contents: read
+jobs:
+  update:
+    runs-on: [self-hosted, openship, linux]
+    timeout-minutes: 120
+    env:
+      OPENSHIP_PROJECT_ID: ${{ vars.OPENSHIP_PROJECT_ID }}
+      TO: ${{ inputs.to }}
+      DRY_RUN: ${{ inputs.dry_run }}
+    steps:
+      - name: manager update
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Locate the manager container by the label Openship stamps on every
+          # compose service container (name changes briefly during a cutover).
+          # Optional repo/workflow variable OPENSHIP_PROJECT_ID narrows the match.
+          filter=(--filter label=openship.service=supabase-manager --filter status=running)
+          [ -z "${OPENSHIP_PROJECT_ID:-}" ] || filter+=(--filter "label=openship.project=${OPENSHIP_PROJECT_ID}")
+          C=$(docker ps -q "${filter[@]}")
+          n=$(printf "%s\n" "$C" | grep -c . || true)
+          if [ "$n" != 1 ]; then
+            echo "::error::Expected exactly 1 running supabase-manager container, found ${n}. Is the project deployed / mid-redeploy? Retry in a minute."
+            docker ps -a --filter label=openship.service=supabase-manager --format "{{.Names}}  {{.Status}}" || true
+            exit 1
+          fi
+          args=()
+          if [ -n "${TO:-}" ]; then
+            case "$TO" in
+              self-hosted/v[0-9]*.[0-9]*.[0-9]*) args+=(--to "$TO") ;;
+              *) echo "::error::'to' must look like self-hosted/vX.Y.Z (got '$TO')"; exit 1 ;;
+            esac
+          fi
+          [ "${DRY_RUN:-false}" != true ] || args+=(--dry-run)
+          echo "running: manager update ${args[*]:-}"
+          rc=0
+          docker exec "$C" manager update "${args[@]}" || rc=$?
+          echo "---"
+          docker exec "$C" manager status || true
+          case "$rc" in
+            0)
+              if [ "${DRY_RUN:-false}" = true ]; then echo "Dry run finished - re-run with dry_run unchecked to apply."
+              else echo "Update finished."; fi ;;
+            3)
+              echo "::error::Update REFUSED before changing anything (breaking/gated release not in ACK_BREAKING, downgrade, or bad tag)."
+              echo "The stack keeps running its current version. Read the notes above, do the manual steps,"
+              echo "set ACK_BREAKING on supabase-manager (Openship env), then run again." ;;
+            2)
+              echo "::error::update.sh left MERGE CONFLICTS in /srv/supabase. Containers were NOT recreated (old version still running)."
+              echo "Resolve the <<<<<<< markers (Openship terminal on supabase-manager), then run this again." ;;
+            *) echo "::error::Update failed (exit $rc). See the log above and the manager state line." ;;
+          esac
+          exit "$rc"

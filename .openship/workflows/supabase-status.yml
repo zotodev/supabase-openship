@@ -1,0 +1,37 @@
+# Openship Actions (independent workflow): one button = "manager status".
+# Manual only (workflow_dispatch): never triggered by a push or a deploy.
+name: "Supabase: status"
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  status:
+    runs-on: [self-hosted, openship, linux]
+    timeout-minutes: 5
+    env:
+      OPENSHIP_PROJECT_ID: ${{ vars.OPENSHIP_PROJECT_ID }}
+    steps:
+      - name: manager status
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Locate the manager container by the label Openship stamps on every
+          # compose service container (name changes briefly during a cutover).
+          # Optional repo/workflow variable OPENSHIP_PROJECT_ID narrows the match.
+          filter=(--filter label=openship.service=supabase-manager --filter status=running)
+          [ -z "${OPENSHIP_PROJECT_ID:-}" ] || filter+=(--filter "label=openship.project=${OPENSHIP_PROJECT_ID}")
+          C=$(docker ps -q "${filter[@]}")
+          n=$(printf "%s\n" "$C" | grep -c . || true)
+          if [ "$n" != 1 ]; then
+            echo "::error::Expected exactly 1 running supabase-manager container, found ${n}. Is the project deployed / mid-redeploy? Retry in a minute."
+            docker ps -a --filter label=openship.service=supabase-manager --format "{{.Names}}  {{.Status}}" || true
+            exit 1
+          fi
+          docker exec "$C" manager status
+          echo "---"
+          if docker exec "$C" manager health; then
+            echo "health: OK"
+          else
+            echo "::warning::manager health check is failing (see state line above)"
+          fi

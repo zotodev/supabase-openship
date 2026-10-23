@@ -1,0 +1,45 @@
+# Openship Actions: one button = "manager backup" (pg_dumpall + pgsodium key +
+# storage/functions files + .env) into BACKUP_DIR on the server.
+# Manual only. For a nightly backup, either use Jobs -> New job -> Run workflow
+# (pick this workflow, schedule "0 3 * * *"), or uncomment the schedule below
+# (Openship runs independent schedules in UTC, min. interval 5 min, while the
+# controller is online; missed runs are not replayed).
+name: "Supabase: backup now"
+on:
+  workflow_dispatch:
+  # schedule:
+  #   - cron: "30 21 * * *"   # 03:00 IST
+permissions:
+  contents: read
+jobs:
+  backup:
+    runs-on: [self-hosted, openship, linux]
+    timeout-minutes: 60
+    env:
+      OPENSHIP_PROJECT_ID: ${{ vars.OPENSHIP_PROJECT_ID }}
+    steps:
+      - name: manager backup
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Locate the manager container by the label Openship stamps on every
+          # compose service container (name changes briefly during a cutover).
+          # Optional repo/workflow variable OPENSHIP_PROJECT_ID narrows the match.
+          filter=(--filter label=openship.service=supabase-manager --filter status=running)
+          [ -z "${OPENSHIP_PROJECT_ID:-}" ] || filter+=(--filter "label=openship.project=${OPENSHIP_PROJECT_ID}")
+          C=$(docker ps -q "${filter[@]}")
+          n=$(printf "%s\n" "$C" | grep -c . || true)
+          if [ "$n" != 1 ]; then
+            echo "::error::Expected exactly 1 running supabase-manager container, found ${n}. Is the project deployed / mid-redeploy? Retry in a minute."
+            docker ps -a --filter label=openship.service=supabase-manager --format "{{.Names}}  {{.Status}}" || true
+            exit 1
+          fi
+          rc=0
+          out=$(docker exec "$C" manager backup) || rc=$?
+          if [ "$rc" != 0 ]; then
+            echo "::error::manager backup failed (exit $rc) - see the log above"
+            exit "$rc"
+          fi
+          dir=$(printf "%s\n" "$out" | tail -n1)
+          echo "Backup written on the server: $dir"
+          docker exec "$C" ls -la "$dir"
